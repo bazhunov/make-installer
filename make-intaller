@@ -1,0 +1,216 @@
+#!/bin/bash
+
+# Script for creating a self-extracting installer from the archive
+# Build date: 12.04.2023
+# Author: Bazhunov S. Dmitry
+# E-mail: dimab777@gmail.com 
+
+VERSION=2.0.0.0
+
+function check_cmd()
+{
+	command -v $1 >/dev/null 2>&1 || { echo "ERROR: '$1' is required but it's not installed. Aborting."; exit 1; }
+}
+
+check_cmd xxd;
+check_cmd sed;
+check_cmd tail;
+check_cmd realpath;
+check_cmd basename;
+check_cmd dirname;
+
+
+########### SIGINT handler ############
+function _int() {
+  echo "SIGINT received, the program has been terminated"
+  exit 1
+}
+
+########### SIGTERM handler ############
+function _term() {
+  echo "SIGTERM received, the program has been terminated"
+  exit 1
+}
+
+########### SIGKILL handler ############
+function _kill() {
+  echo "SIGKILL received, the program has been terminated"
+  exit 1
+}
+
+function help() {
+  local long_help=$1	
+  echo "Script for creating a self-extracting installer from the archive"
+  echo "Version: $VERSION"
+  echo "Usage: $0  [ -h|--help ] | [-v|--version] | [-b|--binary] [-d|--destination <path>] <-a|--archive <tar.gz file>>"
+  if [ ! -z $long_help ]; then
+    echo ""
+    echo "-h|--help                     Display help and exit"
+    echo "-v|--version                  Display version and exit"
+    echo "-b|--binary                   Create a binary self-extracting installer. The 'shc' (shell script compiler) utility is required."
+    echo "                              In absence 'shc', the option will not work and self-extracting bash-installer will be created."
+    echo "                              URL: https://neurobin.org/projects/softwares/unix/shc"
+    echo "-d|--destination <path>       The destination path for extracting data. Default: current directory"
+    echo "-a|--archive <tar.gz file>    Source archive (file type: tar.gz )"
+    echo ""
+  fi
+}	
+
+# Set SIGINT handler
+trap _int SIGINT
+
+# Set SIGTERM handler
+trap _term SIGTERM
+
+# Set SIGKILL handler
+trap _kill SIGKILL
+
+if [ $# -eq 0 ]; then
+  echo "ERROR: Invalid option" 
+  help
+  exit 1
+fi
+
+
+DECODE="xxd -r -p"
+ENCODE="xxd -p"
+ARCHIVE=
+DESTINATION="."
+SCRIPT_TERM="################# START_DATA #################"
+BINARY=0
+
+until [ -z "$1" ]; do
+  case "$1" in
+    -h|--help)
+      help  1
+      exit 0
+    ;;
+    -v|--version)
+      echo $VERSION
+      exit 0
+    ;;
+    -b|--binary)
+      if ! command -v shc >/dev/null 2>&1 ; then
+        echo "WARNING: To create a binary installer file, a pre-installed 'shc' (shell script compiler) utility is required." 
+        echo "In absence 'shc', the option will not work and self-extracting bash-installer will be created."
+        echo "URL: https://neurobin.org/projects/softwares/unix/shc"
+      else
+        BINARY=1
+      fi
+    ;;
+    -d|--destination)
+      shift
+      DESTINATION=$1
+    ;;
+    -a|--archive)
+      shift
+      ARCHIVE=$1
+      if [ ! -f $ARCHIVE ]; then
+        echo "ERROR: The archive file was not found."
+        help
+        exit 1
+      fi
+      tar -tzf "$ARCHIVE" >/dev/null 2>&1
+      if [ $? -ne 0 ]; then
+        echo "ERROR: Corrupted archive file."
+	help
+	exit 1
+      fi
+    ;;
+    *)
+      echo "ERROR: Invalid option -- '$1'"
+      help
+      exit 1
+    ;;
+  esac
+  shift
+done
+
+if [ -z $ARCHIVE ]; then
+  echo "ERROR: The required parameter is missing (-a|--archive)"
+  help
+  exit 1
+fi
+
+### Main block
+
+INSTALLER=$( basename "$( echo -n "${ARCHIVE%.tar.gz}" ).sh" )
+INSTALLER_BIN=$( basename "$( echo -n "${ARCHIVE%.tar.gz}" ).bin" )
+
+[ -f "${INSTALLER}" ] && rm "${INSTALLER}" 
+[ -f "${INSTALLER_BIN}" ] && rm "${INSTALLER_BIN}" 
+
+cat << EOF >> "${INSTALLER}" 
+#!/bin/bash
+# Self-extracting installer: ${INSTALLER} 
+# Created: $( date +"%Y.%m.%d %H:%M:%S" )
+
+function check_cmd()
+{
+        command -v \$1 >/dev/null 2>&1 || { echo "ERROR: '\$1' is required but it's not installed. Aborting."; exit 1; }
+}
+
+check_cmd xxd
+check_cmd md5sum
+check_cmd sed
+check_cmd tar
+check_cmd realpath
+
+MD5=$( md5sum "${ARCHIVE}" | cut -d" " -f1 )
+SELF=\$( realpath "\$0" )
+INSTALLER=$INSTALLER
+ARCHIVE="\${INSTALLER%.sh}".tar.gz
+DESTINATION=${DESTINATION}
+TMP_DIR=\$( mktemp -d /tmp/tmp.XXXXXX )
+
+[ ! -d "\$DESTINATION" ] && mkdir -p "\$DESTINATION"
+
+echo "Checking checksum data ..."
+
+sed -e '1,/^${SCRIPT_TERM}$/d' "\$SELF" | $DECODE > "\$TMP_DIR/\$ARCHIVE"
+DATA_MD5=\$( md5sum "\$TMP_DIR/\$ARCHIVE" | cut -d" " -f1 )
+
+if [ ! "\$MD5" = "\$DATA_MD5" ]; then
+  echo "ERROR: Bad checksum"
+  rm "\$TMP_DIR/\$ARCHIVE"
+  exit 1
+fi
+
+echo "Data unpacking begins ..."
+
+exit_code=0
+tar -xzf "\$TMP_DIR/\$ARCHIVE" -C "\$DESTINATION" >/dev/null 2>&1
+
+
+if [ \$? -ne 0 ]; then
+  echo "ERROR: Unable to unpack the data. The data is corrupted."
+  exit_code=1
+else
+  echo "Done."
+fi
+
+rm "\$TMP_DIR/\$ARCHIVE"
+exit \$exit_code
+
+EOF
+
+OUTPUT=$INSTALLER
+if [ $BINARY -ne 0 ]; then
+   shc -r -f "${INSTALLER}" -o "${INSTALLER_BIN}" 2>/dev/null
+   if [ $? -ne 0 ]; then
+     echo "ERROR: Can't compile bash installer."
+     exit 1
+   fi
+   rm "$INSTALLER"*
+   OUTPUT=$INSTALLER_BIN
+   echo >> $OUTPUT
+fi
+
+cat << EOF >> "$OUTPUT"
+${SCRIPT_TERM}
+$( ${ENCODE} "${ARCHIVE}" )
+EOF
+
+chmod +x "${OUTPUT}"
+
+exit 0
